@@ -143,7 +143,7 @@ batched_model = BatchedInstrument(SAMPLE_RATE, soundfile_dirs=[str(Path(os.getcw
 jit_batched_inference = jax.jit(partial(batched_model.apply, mutable='intermediates'), static_argnums=[2])
 
 # Pass a batched tensor of freq/gain/gate and a batch of parameters to the batched Instrument.
-T = int(SAMPLE_RATE*0.5)
+T = int(SAMPLE_RATE*0.1)
 
 def pitch_to_hz(pitch):
     return 440.0*(2.0**((pitch - 69)/12.0))
@@ -178,7 +178,19 @@ params['VmapFaustVoice_0']['_dawdreamer/WT Pos'] = jnp.linspace(-1, 1, num=BATCH
 print(f"Model parameter initialization time: {time.time() - start_time:.2f} seconds")
 
 ### Step 2: Create a Target Sound
-target_sound = jnp.sin(2 * np.pi * 440 * jnp.linspace(0, 1, T))  # Example: 440 Hz sine wave
+def generate_saw_wave(frequency, duration, sample_rate):
+    t = jnp.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+    saw_wave = 2 * (t * frequency - jnp.floor(t * frequency + 0.5))
+    return saw_wave
+
+# Parameters
+frequency = 440  # Frequency of the saw wave
+duration = T / SAMPLE_RATE  # Duration in seconds
+sample_rate = SAMPLE_RATE  # Sample rate
+
+# Generate the saw wave
+target_sound = generate_saw_wave(frequency, duration, sample_rate)
+
 
 ### Step 3: Define a Loss Function
 def loss_fn(params, x, y):
@@ -204,7 +216,7 @@ def train_step(state, x, y):
     return state, loss
 
 # Training loop
-num_steps = 10
+num_steps = 100
 pbar = tqdm(range(num_steps))
 losses = []
 
@@ -224,12 +236,12 @@ plt.title("Loss over time")
 plt.show()
 
 # Generate the final audio using the optimized parameters
-print("Generating final audio...")
-final_audio = batched_model.apply({'params': state.params}, input_tensor, T)
+# print("Generating final audio...")
+# final_audio = batched_model.apply({'params': state.params}, input_tensor, T)
 
-# Plot the generated audio
-plt.plot(final_audio[0])
-plt.xlabel("Sample")
-plt.ylabel("Amplitude")
-plt.title("Generated Audio")
-plt.show()
+# # Plot the generated audio
+# plt.plot(final_audio[0])
+# plt.xlabel("Sample")
+# plt.ylabel("Amplitude")
+# plt.title("Generated Audio")
+# plt.show()

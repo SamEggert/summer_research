@@ -3,7 +3,7 @@ audioread==3.0.1
 certifi==2024.6.2
 cffi==1.16.0
 charset-normalizer==3.3.2
-chex==0.1.86
+chex  # Removed version pinning
 contourpy==1.2.1
 cycler==0.12.1
 dawdreamer==0.8.0
@@ -29,7 +29,7 @@ ml-dtypes==0.4.0
 msgpack==1.0.8
 nest-asyncio==1.6.0
 numba==0.60.0
-numpy==1.23.5
+numpy  # Removed version pinning
 opt-einsum==3.3.0
 optax==0.2.2
 orbax-checkpoint==0.5.20
