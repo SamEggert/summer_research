@@ -143,7 +143,7 @@ batched_model = BatchedInstrument(SAMPLE_RATE, soundfile_dirs=[str(Path(os.getcw
 jit_batched_inference = jax.jit(partial(batched_model.apply, mutable='intermediates'), static_argnums=[2])
 
 # Pass a batched tensor of freq/gain/gate and a batch of parameters to the batched Instrument.
-T = int(SAMPLE_RATE*0.1)
+T = int(SAMPLE_RATE*0.05)
 
 def pitch_to_hz(pitch):
     return 440.0*(2.0**((pitch - 69)/12.0))
@@ -159,11 +159,7 @@ def pitch_to_tensor(pitch, gain, note_dur, total_dur):
 print("Creating input tensors...")
 start_time = time.time()
 input_tensor = jnp.stack([
-    pitch_to_tensor(60, 1, int(SAMPLE_RATE*1.), T),
-    pitch_to_tensor(62, 1, int(SAMPLE_RATE*1.), T),
-    pitch_to_tensor(64, 1, int(SAMPLE_RATE*1.), T),
-    pitch_to_tensor(65, 1, int(SAMPLE_RATE*1.), T),
-    pitch_to_tensor(67, 1, int(SAMPLE_RATE*1.), T),
+    pitch_to_tensor(69, 1, T, T),
 ], axis=0)
 print(f"Created input tensors in {time.time() - start_time:.2f} seconds")
 
@@ -189,7 +185,11 @@ duration = T / SAMPLE_RATE  # Duration in seconds
 sample_rate = SAMPLE_RATE  # Sample rate
 
 # Generate the saw wave
-target_sound = generate_saw_wave(frequency, duration, sample_rate)
+# target_sound = generate_saw_wave(frequency, duration, sample_rate)
+target_sound = jnp.sin(2 * np.pi * 440 * jnp.linspace(0, 1, T) / sample_rate)
+
+# plt.plot(target_sound)
+# plt.show()
 
 
 ### Step 3: Define a Loss Function
@@ -199,7 +199,7 @@ def loss_fn(params, x, y):
     return loss, pred
 
 ### Step 4: Optimize Parameters
-learning_rate = 1e-3
+learning_rate = 1e-2
 tx = optax.adam(learning_rate)
 state = train_state.TrainState.create(apply_fn=batched_model.apply, params=params, tx=tx)
 
@@ -216,7 +216,7 @@ def train_step(state, x, y):
     return state, loss
 
 # Training loop
-num_steps = 100
+num_steps = 500
 pbar = tqdm(range(num_steps))
 losses = []
 
@@ -236,8 +236,8 @@ plt.title("Loss over time")
 plt.show()
 
 # Generate the final audio using the optimized parameters
-# print("Generating final audio...")
-# final_audio = batched_model.apply({'params': state.params}, input_tensor, T)
+print("Generating final audio...")
+final_audio = batched_model.apply({'params': state.params}, input_tensor, T)
 
 # # Plot the generated audio
 # plt.plot(final_audio[0])
