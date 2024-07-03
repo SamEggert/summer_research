@@ -143,7 +143,7 @@ batched_model = BatchedInstrument(SAMPLE_RATE, soundfile_dirs=[str(Path(os.getcw
 jit_batched_inference = jax.jit(partial(batched_model.apply, mutable='intermediates'), static_argnums=[2])
 
 # Pass a batched tensor of freq/gain/gate and a batch of parameters to the batched Instrument.
-T = int(SAMPLE_RATE*2.)
+T = int(SAMPLE_RATE*0.5)
 
 def pitch_to_hz(pitch):
     return 440.0*(2.0**((pitch - 69)/12.0))
@@ -193,18 +193,14 @@ state = train_state.TrainState.create(apply_fn=batched_model.apply, params=param
 
 @jax.jit
 def train_step(state, x, y):
-    print("1")
     def loss_fn(params):
-        pred, _ = jit_batched_inference({'params': params}, x, T)
+        pred = batched_model.apply({'params': params}, x, T)
         loss = jnp.mean(jnp.abs(pred - y))
         return loss, pred
-    print("2")
+
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    print("3")
-    (loss, _), grads = grad_fn(state.params)
-    print("4")
+    (loss, pred), grads = grad_fn(state.params)
     state = state.apply_gradients(grads=grads)
-    print("5")
     return state, loss
 
 # Training loop
@@ -229,9 +225,7 @@ plt.show()
 
 # Generate the final audio using the optimized parameters
 print("Generating final audio...")
-start_time = time.time()
-final_audio, _ = jit_batched_inference({'params': state.params}, input_tensor, T)
-print(f"Final audio generation time: {time.time() - start_time:.2f} seconds")
+final_audio = batched_model.apply({'params': state.params}, input_tensor, T)
 
 # Plot the generated audio
 plt.plot(final_audio[0])
