@@ -13,6 +13,7 @@ from dawdreamer.faust import FaustContext
 from dawdreamer.faust.box import *
 from tqdm import tqdm
 import time
+from jax import scipy as jsp
 
 jax.config.update('jax_platform_name', 'cpu')
 
@@ -191,29 +192,62 @@ target_sound = jnp.sin(2 * np.pi * 440 * jnp.linspace(0, 1, T) / sample_rate)
 # plt.plot(target_sound)
 # plt.show()
 
-
-### Step 3: Define a Loss Function
-def loss_fn(params, x, y):
-    pred, mod_vars = jit_batched_inference({'params': params}, x, T)
-    loss = jnp.mean(jnp.abs(pred - y))
-    return loss, pred
-
 ### Step 4: Optimize Parameters
 learning_rate = 1e-2
 tx = optax.adam(learning_rate)
 state = train_state.TrainState.create(apply_fn=batched_model.apply, params=params, tx=tx)
 
+
 @jax.jit
 def train_step(state, x, y):
     def loss_fn(params):
         pred = batched_model.apply({'params': params}, x, T)
-        loss = jnp.mean(jnp.abs(pred - y))
+
+        # Compute the STFT of the predicted and target audio using JAX
+        def compute_stft(audio):
+            # Define parameters for STFT
+            n_fft = 2048
+            hop_length = 512
+            win_length = 2048
+
+            # Create window function
+            window = jnp.hanning(win_length)
+
+            # Ensure audio is 2D (add channel dimension if necessary)
+            if audio.ndim == 1:
+                audio = audio[jnp.newaxis, :]
+
+            # Pad or truncate audio to match window length
+            if audio.shape[-1] < win_length:
+                pad_width = ((0, 0), (0, win_length - audio.shape[-1]))
+                audio = jnp.pad(audio, pad_width, mode='constant')
+            elif audio.shape[-1] > win_length:
+                audio = audio[:, :win_length]
+
+            # Apply window function to each channel separately
+            windowed_audio = audio * window.reshape(1, -1)  # Reshape for broadcasting
+
+            # Compute the STFT for each channel using rfft
+            stft = jax.numpy.fft.rfft(windowed_audio, n=n_fft, axis=-1)
+
+            return jnp.abs(stft)
+
+        pred_audio = pred[0]  # No need to convert to numpy
+        target_audio = y
+
+        pred_mag = compute_stft(pred_audio)
+        target_mag = compute_stft(target_audio)
+
+        # Compute the mean absolute error between the magnitude spectrograms
+        loss = jnp.mean(jnp.abs(pred_mag - target_mag))
+
         return loss, pred
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, pred), grads = grad_fn(state.params)
     state = state.apply_gradients(grads=grads)
     return state, loss
+
 
 # Training loop
 num_steps = 500
@@ -239,9 +273,46 @@ plt.show()
 print("Generating final audio...")
 final_audio = batched_model.apply({'params': state.params}, input_tensor, T)
 
+def compute_stft(audio):
+            # Define parameters for STFT
+            n_fft = 2048
+            hop_length = 512
+            win_length = 2048
+
+            # Create window function
+            window = jnp.hanning(win_length)
+
+            # Ensure audio is 2D (add channel dimension if necessary)
+            if audio.ndim == 1:
+                audio = audio[jnp.newaxis, :]
+
+            # Pad or truncate audio to match window length
+            if audio.shape[-1] < win_length:
+                pad_width = ((0, 0), (0, win_length - audio.shape[-1]))
+                audio = jnp.pad(audio, pad_width, mode='constant')
+            elif audio.shape[-1] > win_length:
+                audio = audio[:, :win_length]
+
+            # Apply window function to each channel separately
+            windowed_audio = audio * window.reshape(1, -1)  # Reshape for broadcasting
+
+            # Compute the STFT for each channel using rfft
+            stft = jax.numpy.fft.rfft(windowed_audio, n=n_fft, axis=-1)
+
+            return jnp.abs(stft)
 # # Plot the generated audio
 # plt.plot(final_audio[0])
 # plt.xlabel("Sample")
 # plt.ylabel("Amplitude")
 # plt.title("Generated Audio")
 # plt.show()
+
+
+### TASKS FOR MONDAY ###################################################
+### visualize spectrogram (especially over time in training)
+### play audio and save audio
+
+### use an evolutionary algorithm library
+###      evosax (use tutorial notebook)
+###      qdax (quality-diversity)
+###      ctag paper
