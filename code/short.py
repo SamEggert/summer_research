@@ -14,6 +14,10 @@ from dawdreamer.faust.box import *
 from tqdm import tqdm
 import time
 
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=UserWarning)
+
 jax.config.update('jax_platform_name', 'cpu')
 
 SAMPLE_RATE = 44100
@@ -153,25 +157,58 @@ target_sound = jnp.stack([
     generate_saw_wave(pitch_to_hz(pitch), duration, sample_rate) for pitch in pitches
 ], axis=0)
 
+
 target_sound = jnp.expand_dims(target_sound, 1)
 print('target sound shape: ', target_sound.shape)
+def stft(x, fft_size, hop_length, window_fn=jnp.hanning):
+    """Short-time Fourier transform using JAX."""
+    window = window_fn(fft_size)
+    pad_amount = (fft_size - hop_length) // 2
+    x = jnp.pad(x, ((0, 0), (0, 0), (pad_amount, pad_amount)))
 
-### Step 4: Optimize Parameters
-learning_rate = 1e-2
-tx = optax.adam(learning_rate)
-state = train_state.TrainState.create(apply_fn=batched_model.apply, params=params, tx=tx)
+    def frame(x):
+        nframes = 1 + (x.shape[-1] - fft_size) // hop_length
+        return jnp.stack([x[..., i*hop_length:i*hop_length+fft_size] for i in range(nframes)], axis=-2)
 
+    framed = frame(x)
+    windowed = framed * window
+    return jnp.fft.rfft(windowed)
+
+def spectrogram(x, fft_size=2048, hop_length=512):
+    """Compute the spectrogram of a signal using JAX."""
+    stft_result = stft(x, fft_size, hop_length)
+    return jnp.abs(stft_result)
+
+def spectrogram_loss(pred, target):
+    """Compute the loss between two spectrograms."""
+    pred_spec = spectrogram(pred)
+    target_spec = spectrogram(target)
+    return jnp.mean(jnp.abs(pred_spec - target_spec))
+
+# Modified train step function
 @jax.jit
 def train_step(state, x, y):
     def loss_fn(params):
         pred = batched_model.apply({'params': params}, x, T)
-        loss = jnp.mean(jnp.abs(pred - y))
+        loss = spectrogram_loss(pred, y)
         return loss, pred
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
     (loss, pred), grads = grad_fn(state.params)
     state = state.apply_gradients(grads=grads)
     return state, loss
+
+
+# Initialize optimizer
+learning_rate = 1e-2
+tx = optax.adam(learning_rate)
+
+# Create initial training state
+state = train_state.TrainState.create(
+    apply_fn=batched_model.apply,
+    params=params,
+    tx=tx
+)
 
 # Training loop
 num_steps = 300
@@ -186,20 +223,10 @@ for step in pbar:
     step_end_time = time.time()
     pbar.set_description(f"Step {step}, Loss: {loss:.4f}, Step Time: {step_end_time - step_start_time:.2f} seconds")
 
+
 # Plot the loss over time
 plt.plot(losses)
 plt.xlabel("Step")
 plt.ylabel("Loss")
 plt.title("Loss over time")
 plt.show()
-
-# Generate the final audio using the optimized parameters
-# print("Generating final audio...")
-# final_audio = batched_model.apply({'params': state.params}, input_tensor, T)
-
-# # Plot the generated audio
-# plt.plot(final_audio[0])
-# plt.xlabel("Sample")
-# plt.ylabel("Amplitude")
-# plt.title("Generated Audio")
-# plt.show()
