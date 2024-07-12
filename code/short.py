@@ -13,8 +13,6 @@ from dawdreamer.faust import FaustContext
 from dawdreamer.faust.box import *
 from tqdm import tqdm
 import time
-import soundfile as sf
-import librosa
 
 jax.config.update('jax_platform_name', 'cpu')
 
@@ -44,7 +42,6 @@ print("Constructing Faust code...")
 start_time = time.time()
 dsp_content = f"""
 import("stdfaust.lib");
-
 // `sf` is a soundfile primitive
 wavetable(sf, idx) = it.lagrangeN(N, f_idx, par(i, N + 1, table(i_idx - int(N / 2) + i)))
 with {{
@@ -56,9 +53,7 @@ with {{
     i_idx = int(idx);
 }};
 {insert_string}
-
 NUM_TABLES = outputs(wavetables);
-
 // ---------------multiwavetable-----------------------------
 // All wavetables are placed evenly apart from each other.
 //
@@ -70,21 +65,16 @@ with {{
     wavetables_output = ridx <: wavetables;
     coeff = par(i, NUM_TABLES, max(0, 1-abs(i-wt_pos*(NUM_TABLES-1))));
 }};
-
 S = 2048; // the length of the wavecycles, which we decided elsewhere
-
 wavetable_synth = multiwavetable(wtpos, ridx)*env1*gain
 with {{
     freq = hslider("freq [style:knob]", 200 , 50  , 1000, .01 );
     gain = hslider("gain [style:knob]", .5  , 0   , 1   , .01 );
     gate = button("gate");
-
     wtpos = hslider("WT Pos [style:knob]", 0   , 0    , 1   ,  .01);
-
     ridx = os.hsp_phasor(S, freq, ba.impulsify(gate), 0);
     env1 = en.adsr(.01, 0, 1, .1, gate);
 }};
-
 replace = !,_;
 process = ["freq":replace, "gain":replace, "gate":replace -> wavetable_synth];
 """
@@ -107,45 +97,17 @@ print(f"Faust to JAX conversion time: {time.time() - start_time:.2f} seconds")
 # Use jax.linen.vmap to batch several voices, sharing parameters and PRNG among them.
 PolyVoice = nn.vmap(MonoVoice, in_axes=(0, None), variable_axes={'params': None}, split_rngs={'params': False})
 
-# Define the FX module (stereo panner)
-dsp_content = """
-import("stdfaust.lib");
-pan = hslider("pan", 0.5, 0, 1, .01);
-process = sp.panner(pan);
-"""
-
-print("Converting FX module to JAX...")
-start_time = time.time()
-with FaustContext():
-    box = boxFromDSP(dsp_content, [])
-    module_name = 'FaustFX'
-    jax_code = boxToSource(box, 'jax', module_name, ['-a', 'jax/minimal.py'])
-custom_globals = {}
-exec(jax_code, custom_globals)  # security risk!
-FaustFX = custom_globals[module_name]
-print(f"FX module conversion time: {time.time() - start_time:.2f} seconds")
-
-# Create an Instrument module that calls the voice batch, sums them, and passes it to the FX module.
-class PolyInstrument(nn.Module):
-    sample_rate: int
-    soundfile_dirs: list[str]
-
-    @nn.compact
-    def __call__(self, x, T: int) -> jnp.array:
-        polyvoices = PolyVoice(sample_rate=self.sample_rate, soundfile_dirs=self.soundfile_dirs)
-        audio = polyvoices(x, T)
-        audio = jnp.sum(audio, axis=0)
-        fx = FaustFX(sample_rate=self.sample_rate)
-        audio = fx(audio, T)
-        return audio
-
 SAMPLE_RATE = 44100
-BatchedInstrument = nn.vmap(PolyInstrument, in_axes=(0, None), variable_axes={'params': 0}, split_rngs={'params': True})
-batched_model = BatchedInstrument(SAMPLE_RATE, soundfile_dirs=[str(Path(os.getcwd())), str(Path(os.getcwd())/"MB_Saw")])
+soundfile_dirs = [
+    str(Path(os.getcwd())),
+    str(Path(os.getcwd())/"MB_Saw"),
+    '/mnt/c/Users/braun/GitHub/sam-eggert-summer_research/code/MB_Saw'
+]
+batched_model = PolyVoice(SAMPLE_RATE, soundfile_dirs=soundfile_dirs)
 jit_batched_inference = jax.jit(partial(batched_model.apply, mutable='intermediates'), static_argnums=[2])
 
 # Pass a batched tensor of freq/gain/gate and a batch of parameters to the batched Instrument.
-T = int(SAMPLE_RATE*0.05)
+T = int(SAMPLE_RATE*0.1)
 
 def pitch_to_hz(pitch):
     return 440.0*(2.0**((pitch - 69)/12.0))
@@ -155,13 +117,15 @@ def pitch_to_tensor(pitch, gain, note_dur, total_dur):
     tensor = jnp.zeros((3, total_dur))
     tensor = tensor.at[:2, :].set(jnp.array([freq, gain]).reshape(2, 1))
     tensor = tensor.at[2, :note_dur].set(jnp.array([1]))
-    tensor = jnp.expand_dims(tensor, axis=0)
     return tensor
+
+# pitches = [60, 64, 65, 67, 69]
+pitches = [69]
 
 print("Creating input tensors...")
 start_time = time.time()
 input_tensor = jnp.stack([
-    pitch_to_tensor(69, 1, T, T),
+    pitch_to_tensor(pitch, 1, T, T) for pitch in pitches
 ], axis=0)
 print(f"Created input tensors in {time.time() - start_time:.2f} seconds")
 
@@ -172,7 +136,6 @@ key, subkey = random.split(key)
 print("Initializing model parameters...")
 start_time = time.time()
 params = batched_model.init({'params': subkey}, input_tensor, T)['params']
-params['VmapFaustVoice_0']['_dawdreamer/WT Pos'] = jnp.linspace(-1, 1, num=BATCH_SIZE)
 print(f"Model parameter initialization time: {time.time() - start_time:.2f} seconds")
 
 ### Step 2: Create a Target Sound
@@ -182,65 +145,27 @@ def generate_saw_wave(frequency, duration, sample_rate):
     return saw_wave
 
 # Parameters
-frequency = 440  # Frequency of the saw wave
 duration = T / SAMPLE_RATE  # Duration in seconds
 sample_rate = SAMPLE_RATE  # Sample rate
 
 # Generate the saw wave
-target_sound = generate_saw_wave(frequency, duration, sample_rate)
+target_sound = jnp.stack([
+    generate_saw_wave(pitch_to_hz(pitch), duration, sample_rate) for pitch in pitches
+], axis=0)
 
-# Compute the STFT of the predicted and target audio using JAX
-def compute_stft(audio):
-    # Define parameters for STFT
-    n_fft = 2048
-    hop_length = 512
-    win_length = 2048
-
-    # Create window function
-    window = jnp.hanning(win_length)
-
-    # Ensure audio is 2D (add channel dimension if necessary)
-    if audio.ndim == 1:
-        audio = audio[jnp.newaxis, :]
-
-    # Pad or truncate audio to match window length
-    if audio.shape[-1] < win_length:
-        pad_width = ((0, 0), (0, win_length - audio.shape[-1]))
-        audio = jnp.pad(audio, pad_width, mode='constant')
-    elif audio.shape[-1] > win_length:
-        audio = audio[:, :win_length]
-
-    # Apply window function to each channel separately
-    windowed_audio = audio * window.reshape(1, -1)  # Reshape for broadcasting
-
-    # Compute the STFT for each channel using rfft
-    stft = jax.numpy.fft.rfft(windowed_audio, n=n_fft, axis=-1)
-
-    return jnp.abs(stft)
-
-# plt.plot(target_sound)
-# plt.show()
+target_sound = jnp.expand_dims(target_sound, 1)
+print('target sound shape: ', target_sound.shape)
 
 ### Step 4: Optimize Parameters
 learning_rate = 1e-2
 tx = optax.adam(learning_rate)
 state = train_state.TrainState.create(apply_fn=batched_model.apply, params=params, tx=tx)
 
-
 @jax.jit
 def train_step(state, x, y):
     def loss_fn(params):
         pred = batched_model.apply({'params': params}, x, T)
-
-        pred_audio = pred[0]  # No need to convert to numpy
-        target_audio = y
-
-        pred_mag = compute_stft(pred_audio)
-        target_mag = compute_stft(target_audio)
-
-        # Compute the mean absolute error between the magnitude spectrograms
-        loss = jnp.mean(jnp.abs(pred_mag - target_mag))
-
+        loss = jnp.mean(jnp.abs(pred - y))
         return loss, pred
 
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -248,9 +173,8 @@ def train_step(state, x, y):
     state = state.apply_gradients(grads=grads)
     return state, loss
 
-
 # Training loop
-num_steps = 500
+num_steps = 300
 pbar = tqdm(range(num_steps))
 losses = []
 
@@ -269,74 +193,13 @@ plt.ylabel("Loss")
 plt.title("Loss over time")
 plt.show()
 
+# Generate the final audio using the optimized parameters
+# print("Generating final audio...")
+# final_audio = batched_model.apply({'params': state.params}, input_tensor, T)
 
-# Generate and save final generated audio for 1 second
-print("Generating final audio...")
-final_audio_duration = SAMPLE_RATE  # 1 second duration
-final_audio = batched_model.apply({'params': state.params}, input_tensor, final_audio_duration)
-
-# Ensure the generated audio is a 2D numpy array for saving (stereo)
-final_audio = np.array(final_audio[0])
-
-# Clip the values to the range [-1, 1]
-final_audio = np.clip(final_audio, -1.0, 1.0)
-
-# Convert to float32
-final_audio = final_audio.astype(np.float32)
-
-# Verify the shape and data type of final_audio
-print(f"Final audio shape: {final_audio.shape}")
-print(f"Final audio dtype: {final_audio.dtype}")
-
-# Generate and save final generated audio
-final_audio_filename = "final_generated_audio.wav"
-sf.write(final_audio_filename, final_audio.T, SAMPLE_RATE)  # Transpose to match (samples, channels) format
-print(f"Final generated audio saved as {final_audio_filename}")
-
-# Generate the target saw wave for 1 second
-target_audio = generate_saw_wave(frequency, duration, SAMPLE_RATE)
-
-# Clip the values to the range [-1, 1]
-target_audio = np.clip(target_audio, -1.0, 1.0)
-
-# Convert to float32
-target_audio = target_audio.astype(np.float32)
-
-# Save the target audio
-target_audio_filename = "target_audio.wav"
-sf.write(target_audio_filename, target_audio.T, SAMPLE_RATE)  # Transpose to match (samples, channels) format
-print(f"Target audio saved as {target_audio_filename}")
-
-
-
-def visualize_spectrogram(audio, sample_rate, title):
-    # Compute the spectrogram
-    spectrogram = compute_stft(audio)
-
-    # Convert to dB scale
-    spectrogram_db = 20 * jnp.log10(jnp.maximum(jnp.abs(spectrogram), 1e-5))
-
-    # Ensure spectrogram is 2D for visualization
-    if spectrogram_db.ndim == 1:
-        spectrogram_db = spectrogram_db[jnp.newaxis, :]
-
-    # Create the plot
-    plt.figure(figsize=(12, 8))
-    plt.imshow(spectrogram_db.T, aspect='auto', origin='lower', cmap='viridis')
-
-    # Set labels and title
-    plt.xlabel('Time')
-    plt.ylabel('Frequency')
-    plt.title(title)
-
-    # Add colorbar
-    plt.colorbar(format='%+2.0f dB')
-
-    plt.tight_layout()
-    plt.show()
-
-# Visualize target sound spectrogram
-visualize_spectrogram(target_audio, SAMPLE_RATE, "Target Audio Spectrogram")
-
-# Visualize final generated audio spectrogram
-visualize_spectrogram(final_audio, SAMPLE_RATE, "Final Generated Audio Spectrogram")
+# # Plot the generated audio
+# plt.plot(final_audio[0])
+# plt.xlabel("Sample")
+# plt.ylabel("Amplitude")
+# plt.title("Generated Audio")
+# plt.show()
