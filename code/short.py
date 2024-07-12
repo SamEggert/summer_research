@@ -211,7 +211,7 @@ state = train_state.TrainState.create(
 )
 
 # Training loop
-num_steps = 300
+num_steps = 1000
 pbar = tqdm(range(num_steps))
 losses = []
 
@@ -230,3 +230,68 @@ plt.xlabel("Step")
 plt.ylabel("Loss")
 plt.title("Loss over time")
 plt.show()
+
+
+
+
+# ADDED CODE AT THE END TO CREATE WAVE FILES AND VISUALIZE THE SPECTROGRAMS
+
+import soundfile as sf
+import librosa
+import librosa.display
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Generate 1 second of audio
+one_second_samples = SAMPLE_RATE
+
+# Generate target saw wave
+target_audio = generate_saw_wave(pitch_to_hz(pitches[0]), 1, SAMPLE_RATE)
+target_audio_np = np.array(target_audio)  # Convert to NumPy array
+
+# Generate synthesized audio
+synth_params = {'params': state.params}
+synth_input = pitch_to_tensor(pitches[0], 1, one_second_samples, one_second_samples)
+synth_audio = batched_model.apply(synth_params, synth_input[None, ...], one_second_samples)[0, 0]
+synth_audio_np = np.array(synth_audio)  # Convert to NumPy array
+
+# Save audio files
+sf.write('target_saw.wav', target_audio_np, SAMPLE_RATE)
+sf.write('synthesized_audio.wav', synth_audio_np, SAMPLE_RATE)
+
+# Visualize spectrograms using librosa with more options
+plt.figure(figsize=(14, 6))
+
+# Function to plot spectrogram with customized options
+def plot_spectrogram(audio, title, position):
+    plt.subplot(1, 2, position)
+    D = librosa.stft(audio, n_fft=4096, hop_length=1024)  # Increased n_fft for better frequency resolution
+    S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
+    img = librosa.display.specshow(S_db,
+                                   sr=SAMPLE_RATE,
+                                   x_axis='time',
+                                   y_axis='hz',
+                                   cmap='viridis')
+    plt.colorbar(img, format='%+2.0f dB')
+    plt.title(title)
+    plt.yscale('log')  # Set y-axis to logarithmic scale
+    plt.ylim(20, SAMPLE_RATE/2)  # Set y-axis limits from 20 Hz to Nyquist frequency
+
+    # Set custom y-axis ticks and labels
+    yticks = [20, 50, 100, 200, 440, 1000, 2000, 5000, 10000, 20000]
+    plt.yticks(yticks, [str(y) for y in yticks])
+
+    # Add a horizontal line at 440 Hz
+    plt.axhline(y=440, color='r', linestyle='--', alpha=0.5)
+
+# Plot target audio spectrogram
+plot_spectrogram(target_audio_np, 'Target Spectrogram', 1)
+
+# Plot synthesized audio spectrogram
+plot_spectrogram(synth_audio_np, 'Synthesized Spectrogram', 2)
+
+plt.tight_layout()
+plt.show()
+
+print("Audio files saved as 'target_saw.wav' and 'synthesized_audio.wav'")
+print("Spectrogram visualization with detailed frequency labels complete. Check the displayed plot.")
