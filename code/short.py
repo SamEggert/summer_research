@@ -160,7 +160,9 @@ target_sound = jnp.stack([
 
 target_sound = jnp.expand_dims(target_sound, 1)
 print('target sound shape: ', target_sound.shape)
-def stft(x, fft_size, hop_length, window_fn=jnp.hanning):
+
+
+def stft(x, fft_size, hop_length, window_fn=jnp.blackman):
     """Short-time Fourier transform using JAX."""
     window = window_fn(fft_size)
     pad_amount = (fft_size - hop_length) // 2
@@ -234,7 +236,7 @@ plt.show()
 
 
 
-# ADDED CODE AT THE END TO CREATE WAVE FILES AND VISUALIZE THE SPECTROGRAMS
+###### Generation and Visualization ####################################
 
 import soundfile as sf
 import librosa
