@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import jax
 import jax.numpy as jnp
+import jax.scipy.signal as jss
 from jax import random
 from flax import linen as nn
 from flax.training import train_state
@@ -162,24 +163,17 @@ target_sound = jnp.expand_dims(target_sound, 1)
 print('target sound shape: ', target_sound.shape)
 
 
-def stft(x, fft_size, hop_length, window_fn=jnp.blackman):
-    """Short-time Fourier transform using JAX."""
-    window = window_fn(fft_size)
-    pad_amount = (fft_size - hop_length) // 2
-    x = jnp.pad(x, ((0, 0), (0, 0), (pad_amount, pad_amount)))
-
-    def frame(x):
-        nframes = 1 + (x.shape[-1] - fft_size) // hop_length
-        return jnp.stack([x[..., i*hop_length:i*hop_length+fft_size] for i in range(nframes)], axis=-2)
-
-    framed = frame(x)
-    windowed = framed * window
-    return jnp.fft.rfft(windowed)
-
 def spectrogram(x, fft_size=2048, hop_length=512):
-    """Compute the spectrogram of a signal using JAX."""
-    stft_result = stft(x, fft_size, hop_length)
-    return jnp.abs(stft_result)
+    """Compute the spectrogram of a signal using JAX and scipy.signal."""
+    # Ensure the input is 2D (add channel dimension if needed)
+    if x.ndim == 1:
+        x = x[jnp.newaxis, :]
+
+    # Compute STFT
+    f, t, Zxx = jss.stft(x, fs=SAMPLE_RATE, nperseg=fft_size, noverlap=fft_size-hop_length, padded=False, boundary=None)
+
+    # Compute magnitude spectrogram
+    return jnp.abs(Zxx)
 
 def spectrogram_loss(pred, target):
     """Compute the loss between two spectrograms."""
@@ -213,11 +207,11 @@ state = train_state.TrainState.create(
 )
 
 # Training loop
-num_steps = 1000
+print("Starting training loop...")
+num_steps = 200
 pbar = tqdm(range(num_steps))
 losses = []
 
-print("Starting training loop...")
 for step in pbar:
     step_start_time = time.time()
     state, loss = train_step(state, input_tensor, target_sound)
