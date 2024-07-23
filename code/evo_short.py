@@ -13,6 +13,7 @@ import optax
 from dawdreamer.faust import FaustContext
 from dawdreamer.faust.box import *
 from tqdm import tqdm
+from evosax import CMA_ES
 import time
 
 import warnings
@@ -31,7 +32,7 @@ file_names = [os.path.splitext(f)[0] for f in os.listdir(directory) if f.endswit
 file_names.sort()
 print(f"Loaded {len(file_names)} wavetable files in {time.time() - start_time:.2f} seconds")
 
-num_wave_tables = 32
+num_wave_tables = 4
 num_files = len(file_names)
 wave_names = [file_names[i] for i in range(0, num_files, num_files // num_wave_tables)]
 
@@ -136,6 +137,9 @@ print(f"Created input tensors in {time.time() - start_time:.2f} seconds")
 
 BATCH_SIZE = input_tensor.shape[0]
 
+
+
+
 def print_parameters(params, prefix="", level=0, max_level=2):
     if isinstance(params, dict):
         for key, value in params.items():
@@ -153,6 +157,8 @@ def print_parameters(params, prefix="", level=0, max_level=2):
             plt.title(f"{prefix} (first 100 values)")
             plt.show()
 
+
+
 # Initialize model parameters
 key = random.PRNGKey(42)
 key, subkey = random.split(key)
@@ -160,6 +166,10 @@ print("Initializing model parameters...")
 start_time = time.time()
 variables = batched_model.init({'params': subkey}, input_tensor, T)
 params = variables['params']
+
+# Fix the shape of WT Pos parameter if it's a scalar
+if params['_dawdreamer/WT Pos'].ndim == 0:
+    params['_dawdreamer/WT Pos'] = jnp.expand_dims(params['_dawdreamer/WT Pos'], axis=(0, 1))
 
 # Extract `WT Pos` parameter
 wt_pos_params = {'_dawdreamer/WT Pos': params['_dawdreamer/WT Pos']}
@@ -170,6 +180,12 @@ print(f"Model parameter initialization time: {time.time() - start_time:.2f} seco
 # Print the initial parameters
 print("Initial parameters (WT Pos only):")
 print_parameters(wt_pos_params)
+
+
+
+
+
+
 
 ### Step 2: Create a Target Sound
 def generate_saw_wave(frequency, duration, sample_rate):
@@ -207,67 +223,96 @@ def spectrogram_loss(pred, target):
     target_spec = spectrogram(target)
     return jnp.mean(jnp.abs(pred_spec - target_spec))
 
-# Modified train step function
-@jax.jit
-def train_step(state, x, y, fixed_params):
-    def loss_fn(params):
-        # Combine the fixed parameters with the trainable parameters
-        combined_params = {**fixed_params, **params}
-        pred = batched_model.apply({'params': combined_params}, x, T)
-        loss = spectrogram_loss(pred, y)
-        return loss, pred
 
-    grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (loss, pred), grads = grad_fn(state.params)
-    state = state.apply_gradients(grads=grads)
-    return state, loss
 
-# Initialize optimizer
-learning_rate = 1e-2
-tx = optax.adam(learning_rate)
 
-# Create initial training state for WT Pos only
-state = train_state.TrainState.create(
-    apply_fn=batched_model.apply,
-    params=wt_pos_params,
-    tx=tx
-)
 
-# Training loop
-print("Starting training loop...")
-num_steps = 200
-pbar = tqdm(range(num_steps))
+
+# Define the fitness function
+def fitness_function(wt_pos_param, input_tensor, target_sound, fixed_params):
+    # Ensure wt_pos_param is a JAX array with shape (1,)
+    wt_pos_param = jnp.atleast_1d(wt_pos_param)
+    print("WT POS: ", wt_pos_param)
+    wt_pos_param = wt_pos_param.reshape(())
+    # Create parameter dictionary with the given WT Pos value
+    combined_params = {**fixed_params, '_dawdreamer/WT Pos': wt_pos_param}
+    # Predict the output sound
+    pred = batched_model.apply({'params': combined_params}, input_tensor, T)
+    # Calculate the spectrogram loss
+    loss = spectrogram_loss(pred, target_sound)
+    return loss
+
+
+
+# Set up the evolutionary strategy
+num_dims = 1  # Only optimizing the WT Pos parameter
+popsize = 20
+strategy = CMA_ES(popsize=popsize, num_dims=num_dims)
+es_params = strategy.default_params
+
+# Initialize the strategy
+rng = jax.random.PRNGKey(0)
+state = strategy.initialize(rng)
+
+# Run the optimization
+num_generations = 100
 losses = []
 wt_pos_values = []
-for step in pbar:
-    step_start_time = time.time()
-    state, loss = train_step(state, input_tensor, target_sound, fixed_params)
-    losses.append(loss)
-    step_end_time = time.time()
-    pbar.set_description(f"Step {step}, Loss: {loss:.4f}, Step Time: {step_end_time - step_start_time:.2f} seconds")
 
-    if step % 10 == 0:  # Print parameters every 10 steps
-        wt_pos_value = state.params['_dawdreamer/WT Pos']
-        wt_pos_values.append(wt_pos_value)
-        tqdm.write(f"Step {step}, Loss: {loss:.4f}, WT Pos value: {wt_pos_value:.6f}")
+print("Starting evolutionary optimization...")
+for gen in range(num_generations):
+    rng, rng_ask, rng_eval = jax.random.split(rng, 3)
+
+    # Ask for new solutions
+    x, state = strategy.ask(rng_ask, state, es_params)
+
+
+    from functools import partial
+
+    # @partial(jax.vmap, in_axes=None)
+    #def _fitness_function(param):
+    #    return fitness_function(param, input_tensor, target_sound, fixed_params)
+
+    # Ensure x is treated correctly as scalar values for each parameter
+    #fitness = _fitness_function(x)
+    fitness = jax.vmap(lambda param: fitness_function(jnp.array(param), input_tensor, target_sound, fixed_params))(x)
+
+    # Tell the results back to the strategy
+    state = strategy.tell(x, fitness, state, es_params)
+
+    # Logging
+    best_fitness = jnp.min(fitness)
+    best_wt_pos = x[jnp.argmin(fitness)][0]  # Extract the scalar value correctly
+    losses.append(best_fitness)
+    wt_pos_values.append(best_wt_pos)
+
+    if gen % 10 == 0:
+        print(f"Generation {gen}: Best fitness = {best_fitness}, Best WT Pos = {best_wt_pos}")
 
 # Final print to move to the next line after loop ends
 print()
 
-
-# Plot the loss over time
+# Plot the loss over generations
 plt.plot(losses)
-plt.xlabel("Step")
+plt.xlabel("Generation")
 plt.ylabel("Loss")
-plt.title("Loss over time")
+plt.title("Loss over Generations")
 plt.show()
 
-# Plot the WT Pos values over time
+# Plot the WT Pos values over generations
 plt.plot(wt_pos_values)
-plt.xlabel("Step")
+plt.xlabel("Generation")
 plt.ylabel("WT Pos value")
-plt.title("WT Pos over time")
+plt.title("WT Pos over Generations")
 plt.show()
+
+# Final best WT Pos value
+best_wt_pos = wt_pos_values[-1]
+print(f"Best WT Pos after {num_generations} generations: {best_wt_pos}")
+
+
+
+
 
 
 
