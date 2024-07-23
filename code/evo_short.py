@@ -249,10 +249,11 @@ for step in pbar:
     if step % 10 == 0:  # Print parameters every 10 steps
         wt_pos_value = state.params['_dawdreamer/WT Pos']
         wt_pos_values.append(wt_pos_value)
-        print(f"Step {step}, Loss: {loss:.4f}, WT Pos value: {wt_pos_value:.6f}", end='\r')
+        tqdm.write(f"Step {step}, Loss: {loss:.4f}, WT Pos value: {wt_pos_value:.6f}")
 
 # Final print to move to the next line after loop ends
 print()
+
 
 # Plot the loss over time
 plt.plot(losses)
