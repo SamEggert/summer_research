@@ -373,9 +373,44 @@ synth_input = pitch_to_tensor(pitches[0], 1, one_second_samples, one_second_samp
 synth_audio = batched_model.apply({'params': synth_params}, synth_input[None, ...], one_second_samples)[0, 0]
 synth_audio_np = np.array(synth_audio)  # Convert to NumPy array
 
+# TEMP ##################################################
+def generate_synth_sound(duration, sample_rate):
+    # Adjustable parameters - modify these directly in the function
+    adjustable_params = {
+        '_dawdreamer/WT Pos': jnp.array(2.4669297),
+        '_dawdreamer/Low Shelf Gain': jnp.array(-2.7905803),
+        '_dawdreamer/Low Shelf Freq': jnp.array(-5.81432),
+        '_dawdreamer/Mid Peak Gain': jnp.array(-4.855621),
+        '_dawdreamer/Mid Peak Freq': jnp.array(1.5484457),
+        '_dawdreamer/Mid Peak Q': jnp.array(-1.978883),
+        '_dawdreamer/High Shelf Gain': jnp.array(-0.8280931),
+        '_dawdreamer/High Shelf Freq': jnp.array(-0.48556247)
+    }
+
+    # Combine fixed_params with adjustable_params
+    synth_params = {**fixed_params, **adjustable_params}
+
+    # Create input tensor
+    num_samples = int(duration * sample_rate)
+    frequency = 440  # A4 note, modify this if you want a different pitch
+    synth_input = pitch_to_tensor(frequency, 1, num_samples, num_samples)
+
+    # Generate audio using the synth
+    synth_audio = batched_model.apply({'params': synth_params}, synth_input[None, ...], num_samples)
+
+    # Remove batch dimension and return
+    return synth_audio[0, 0]
+
+
+synth_sound = generate_synth_sound(duration, sample_rate)
+print(synth_sound)
+pass
+# TEMP ##################################################
+
 # Save audio files
 sf.write('target_saw.wav', target_audio_np, SAMPLE_RATE)
 sf.write('synthesized_audio.wav', synth_audio_np, SAMPLE_RATE)
+
 
 # Visualize spectrograms using librosa with more options
 plt.figure(figsize=(14, 6))
