@@ -81,10 +81,26 @@ with {{
     ridx = os.hsp_phasor(S, freq, ba.impulsify(gate), 0);
     env1 = en.adsr(.01, 0, 1, .1, gate);
 }};
+
+// 3-band equalizer
+equalizer = fi.low_shelf(LL, FL) : fi.peak_eq(LM, FM, BM) : fi.high_shelf(LH, FH)
+with {{
+    LL = vslider("Low Shelf Gain [unit:dB]", 0, -12, 12, 0.1);
+    FL = hslider("Low Shelf Freq [unit:Hz]", 250, 20, 1000, 1);
+
+    LM = vslider("Mid Peak Gain [unit:dB]", 0, -12, 12, 0.1);
+    FM = hslider("Mid Peak Freq [unit:Hz]", 1000, 100, 5000, 1);
+    BM = hslider("Mid Peak Q", 1, 0.1, 10, 0.1);
+
+    LH = vslider("High Shelf Gain [unit:dB]", 0, -12, 12, 0.1);
+    FH = hslider("High Shelf Freq [unit:Hz]", 4000, 1000, 20000, 1);
+}};
+
 replace = !,_;
-process = ["freq":replace, "gain":replace, "gate":replace -> wavetable_synth];
+process = ["freq":replace, "gain":replace, "gate":replace -> wavetable_synth : equalizer];
 """
 print(f"Constructed Faust code in {time.time() - start_time:.2f} seconds")
+
 
 # Convert Faust code to JAX
 print("Converting Faust code to JAX...")
@@ -171,15 +187,23 @@ params = variables['params']
 if params['_dawdreamer/WT Pos'].ndim == 0:
     params['_dawdreamer/WT Pos'] = jnp.expand_dims(params['_dawdreamer/WT Pos'], axis=(0, 1))
 
-# Extract `WT Pos` parameter
-wt_pos_params = {'_dawdreamer/WT Pos': params['_dawdreamer/WT Pos']}
+trainable_params = {
+    '_dawdreamer/WT Pos': params['_dawdreamer/WT Pos'],
+    '_dawdreamer/Low Shelf Gain': params['_dawdreamer/Low Shelf Gain'],
+    '_dawdreamer/Low Shelf Freq': params['_dawdreamer/Low Shelf Freq'],
+    '_dawdreamer/Mid Peak Gain': params['_dawdreamer/Mid Peak Gain'],
+    '_dawdreamer/Mid Peak Freq': params['_dawdreamer/Mid Peak Freq'],
+    '_dawdreamer/Mid Peak Q': params['_dawdreamer/Mid Peak Q'],
+    '_dawdreamer/High Shelf Gain': params['_dawdreamer/High Shelf Gain'],
+    '_dawdreamer/High Shelf Freq': params['_dawdreamer/High Shelf Freq'],
+}
 # Extract the fixed wavetables
 fixed_params = {k: v for k, v in params.items() if k != '_dawdreamer/WT Pos'}
 print(f"Model parameter initialization time: {time.time() - start_time:.2f} seconds")
 
 # Print the initial parameters
-print("Initial parameters (WT Pos only):")
-print_parameters(wt_pos_params)
+print("Initial parameters:")
+print_parameters(trainable_params)
 
 
 
@@ -191,7 +215,24 @@ print_parameters(wt_pos_params)
 def generate_saw_wave(frequency, duration, sample_rate):
     t = jnp.linspace(0, duration, int(sample_rate * duration), endpoint=False)
     saw_wave = 2 * (t * frequency - jnp.floor(t * frequency + 0.5))
-    return saw_wave
+
+    # Create a sweeping cutoff frequency
+    cutoff_start = frequency * 2  # Start at 2x the fundamental frequency
+    cutoff_end = frequency * 10   # End at 10x the fundamental frequency
+    cutoff = jnp.logspace(jnp.log10(cutoff_start), jnp.log10(cutoff_end), num=len(t))
+
+    # Create a simple low-pass filter kernel
+    kernel_size = 64
+    t_kernel = jnp.linspace(-3, 3, kernel_size)
+    kernel = jnp.sinc(cutoff[:, jnp.newaxis] * t_kernel)
+    kernel = kernel / jnp.sum(kernel, axis=1, keepdims=True)
+
+    # Apply the filter using convolution
+    filtered_wave = jnp.convolve(saw_wave, kernel[0], mode='same')
+    for i in range(1, len(kernel)):
+        filtered_wave = filtered_wave * (1 - 1/len(kernel)) + jnp.convolve(saw_wave, kernel[i], mode='same') * (1/len(kernel))
+
+    return filtered_wave
 
 # Parameters
 duration = T / SAMPLE_RATE  # Duration in seconds
@@ -229,13 +270,9 @@ def spectrogram_loss(pred, target):
 
 
 # Define the fitness function
-def fitness_function(wt_pos_param, input_tensor, target_sound, fixed_params):
-    # Ensure wt_pos_param is a JAX array with shape (1,)
-    wt_pos_param = jnp.atleast_1d(wt_pos_param)
-    print("WT POS: ", wt_pos_param)
-    wt_pos_param = wt_pos_param.reshape(())
-    # Create parameter dictionary with the given WT Pos value
-    combined_params = {**fixed_params, '_dawdreamer/WT Pos': wt_pos_param}
+def fitness_function(params, input_tensor, target_sound, fixed_params):
+    # Combine fixed and trainable parameters
+    combined_params = {**fixed_params, **dict(zip(trainable_params.keys(), params))}
     # Predict the output sound
     pred = batched_model.apply({'params': combined_params}, input_tensor, T)
     # Calculate the spectrogram loss
@@ -245,7 +282,7 @@ def fitness_function(wt_pos_param, input_tensor, target_sound, fixed_params):
 
 
 # Set up the evolutionary strategy
-num_dims = 1  # Only optimizing the WT Pos parameter
+num_dims = len(trainable_params)
 popsize = 20
 strategy = CMA_ES(popsize=popsize, num_dims=num_dims)
 es_params = strategy.default_params
@@ -257,7 +294,7 @@ state = strategy.initialize(rng)
 # Run the optimization
 num_generations = 100
 losses = []
-wt_pos_values = []
+param_values = {k: [] for k in trainable_params.keys()}
 
 print("Starting evolutionary optimization...")
 for gen in range(num_generations):
@@ -266,58 +303,49 @@ for gen in range(num_generations):
     # Ask for new solutions
     x, state = strategy.ask(rng_ask, state, es_params)
 
-
-    from functools import partial
-
-    # @partial(jax.vmap, in_axes=None)
-    #def _fitness_function(param):
-    #    return fitness_function(param, input_tensor, target_sound, fixed_params)
-
-    # Ensure x is treated correctly as scalar values for each parameter
-    #fitness = _fitness_function(x)
-    fitness = jax.vmap(lambda param: fitness_function(jnp.array(param), input_tensor, target_sound, fixed_params))(x)
+    # Evaluate fitness
+    fitness = jax.vmap(lambda params: fitness_function(params, input_tensor, target_sound, fixed_params))(x)
 
     # Tell the results back to the strategy
     state = strategy.tell(x, fitness, state, es_params)
 
     # Logging
     best_fitness = jnp.min(fitness)
-    best_wt_pos = x[jnp.argmin(fitness)][0]  # Extract the scalar value correctly
+    best_params = x[jnp.argmin(fitness)]
     losses.append(best_fitness)
-    wt_pos_values.append(best_wt_pos)
+    for i, key in enumerate(trainable_params.keys()):
+        param_values[key].append(best_params[i])
 
     if gen % 10 == 0:
-        print(f"Generation {gen}: Best fitness = {best_fitness}, Best WT Pos = {best_wt_pos}")
+        print(f"Generation {gen}: Best fitness = {best_fitness}")
+        for key, value in zip(trainable_params.keys(), best_params):
+            print(f"{key} = {value}")
 
 # Final print to move to the next line after loop ends
 print()
 
+
 # Plot the loss over generations
+plt.figure(figsize=(12, 6))
 plt.plot(losses)
 plt.xlabel("Generation")
 plt.ylabel("Loss")
 plt.title("Loss over Generations")
 plt.show()
 
-# Plot the WT Pos values over generations
-plt.plot(wt_pos_values)
-plt.xlabel("Generation")
-plt.ylabel("WT Pos value")
-plt.title("WT Pos over Generations")
+# Plot the parameter values over generations
+fig, axs = plt.subplots(len(trainable_params), 1, figsize=(12, 4*len(trainable_params)))
+for i, (key, values) in enumerate(param_values.items()):
+    axs[i].plot(values)
+    axs[i].set_xlabel("Generation")
+    axs[i].set_ylabel(key)
+    axs[i].set_title(f"{key} over Generations")
+plt.tight_layout()
 plt.show()
-
-# Final best WT Pos value
-best_wt_pos = wt_pos_values[-1]
-print(f"Best WT Pos after {num_generations} generations: {best_wt_pos}")
-
-
-
-
 
 
 
 ###### Generation and Visualization ####################################
-
 
 import soundfile as sf
 import librosa
@@ -332,11 +360,15 @@ one_second_samples = SAMPLE_RATE
 target_audio = generate_saw_wave(pitch_to_hz(pitches[0]), 1, SAMPLE_RATE)
 target_audio_np = np.array(target_audio)  # Convert to NumPy array
 
-# TEMP
-print_parameters(state.params)
-# TEMP
+# Get the best parameters from the evolutionary optimization
+best_params = {k: param_values[k][-1] for k in trainable_params.keys()}
+
+# Print the best parameters
+print("Best parameters:")
+print_parameters(best_params)
+
 # Generate synthesized audio
-synth_params = {**fixed_params, **state.params}
+synth_params = {**fixed_params, **best_params}
 synth_input = pitch_to_tensor(pitches[0], 1, one_second_samples, one_second_samples)
 synth_audio = batched_model.apply({'params': synth_params}, synth_input[None, ...], one_second_samples)[0, 0]
 synth_audio_np = np.array(synth_audio)  # Convert to NumPy array
