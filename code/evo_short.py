@@ -129,7 +129,7 @@ batched_model = PolyVoice(SAMPLE_RATE, soundfile_dirs=soundfile_dirs)
 jit_batched_inference = jax.jit(partial(batched_model.apply, mutable='intermediates'), static_argnums=[2])
 
 # Pass a batched tensor of freq/gain/gate and a batch of parameters to the batched Instrument.
-T = int(SAMPLE_RATE * 0.1)
+T = int(SAMPLE_RATE * 1)
 
 def pitch_to_hz(pitch):
     return 440.0 * (2.0 ** ((pitch - 69) / 12.0))
@@ -188,14 +188,14 @@ if params['_dawdreamer/WT Pos'].ndim == 0:
     params['_dawdreamer/WT Pos'] = jnp.expand_dims(params['_dawdreamer/WT Pos'], axis=(0, 1))
 
 trainable_params = {
-    '_dawdreamer/WT Pos': params['_dawdreamer/WT Pos'],
-    '_dawdreamer/Low Shelf Gain': params['_dawdreamer/Low Shelf Gain'],
-    '_dawdreamer/Low Shelf Freq': params['_dawdreamer/Low Shelf Freq'],
-    '_dawdreamer/Mid Peak Gain': params['_dawdreamer/Mid Peak Gain'],
-    '_dawdreamer/Mid Peak Freq': params['_dawdreamer/Mid Peak Freq'],
-    '_dawdreamer/Mid Peak Q': params['_dawdreamer/Mid Peak Q'],
-    '_dawdreamer/High Shelf Gain': params['_dawdreamer/High Shelf Gain'],
-    '_dawdreamer/High Shelf Freq': params['_dawdreamer/High Shelf Freq'],
+    '_dawdreamer/WT Pos': jnp.array(0.5),  # Midpoint between wavetables
+    '_dawdreamer/Low Shelf Gain': jnp.array(-5.0),
+    '_dawdreamer/Low Shelf Freq': jnp.array(250.0),  # 250 Hz
+    '_dawdreamer/Mid Peak Gain': jnp.array(3.0),
+    '_dawdreamer/Mid Peak Freq': jnp.array(1000.0),  # 1000 Hz
+    '_dawdreamer/Mid Peak Q': jnp.array(1.0),
+    '_dawdreamer/High Shelf Gain': jnp.array(-2.0),
+    '_dawdreamer/High Shelf Freq': jnp.array(4000.0)  # 4000 Hz
 }
 # Extract the fixed wavetables
 fixed_params = {k: v for k, v in params.items() if k != '_dawdreamer/WT Pos'}
@@ -212,27 +212,29 @@ print_parameters(trainable_params)
 
 
 ### Step 2: Create a Target Sound
-def generate_saw_wave(frequency, duration, sample_rate):
-    t = jnp.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    saw_wave = 2 * (t * frequency - jnp.floor(t * frequency + 0.5))
+def generate_synth_sound(frequency, duration, sample_rate):
+    # Adjustable parameters - modify these directly in the function
+    adjustable_params = {
+        '_dawdreamer/WT Pos': jnp.array(0.5),
+        '_dawdreamer/Low Shelf Gain': jnp.array(0),
+        '_dawdreamer/Low Shelf Freq': jnp.array(0),
+        '_dawdreamer/Mid Peak Gain': jnp.array(0),
+        '_dawdreamer/Mid Peak Freq': jnp.array(0),
+        '_dawdreamer/Mid Peak Q': jnp.array(0),
+        '_dawdreamer/High Shelf Gain': jnp.array(0),
+        '_dawdreamer/High Shelf Freq': jnp.array(0)
+    }
 
-    # Create a sweeping cutoff frequency
-    cutoff_start = frequency * 2  # Start at 2x the fundamental frequency
-    cutoff_end = frequency * 10   # End at 10x the fundamental frequency
-    cutoff = jnp.logspace(jnp.log10(cutoff_start), jnp.log10(cutoff_end), num=len(t))
+    # Combine fixed_params with adjustable_params
+    synth_params = {**fixed_params, **adjustable_params}
 
-    # Create a simple low-pass filter kernel
-    kernel_size = 64
-    t_kernel = jnp.linspace(-3, 3, kernel_size)
-    kernel = jnp.sinc(cutoff[:, jnp.newaxis] * t_kernel)
-    kernel = kernel / jnp.sum(kernel, axis=1, keepdims=True)
+    num_samples = int(duration * sample_rate)
+    synth_input = pitch_to_tensor(frequency, 1, num_samples, num_samples)
 
-    # Apply the filter using convolution
-    filtered_wave = jnp.convolve(saw_wave, kernel[0], mode='same')
-    for i in range(1, len(kernel)):
-        filtered_wave = filtered_wave * (1 - 1/len(kernel)) + jnp.convolve(saw_wave, kernel[i], mode='same') * (1/len(kernel))
+    synth_audio = batched_model.apply({'params': synth_params}, synth_input[None, ...], num_samples)
 
-    return filtered_wave
+    return synth_audio[0, 0]
+
 
 # Parameters
 duration = T / SAMPLE_RATE  # Duration in seconds
@@ -240,7 +242,7 @@ sample_rate = SAMPLE_RATE  # Sample rate
 
 # Generate the saw wave
 target_sound = jnp.stack([
-    generate_saw_wave(pitch_to_hz(pitch), duration, sample_rate) for pitch in pitches
+    generate_synth_sound(pitch_to_hz(pitch), duration, sample_rate) for pitch in pitches
 ], axis=0)
 
 target_sound = jnp.expand_dims(target_sound, 1)
@@ -286,13 +288,14 @@ num_dims = len(trainable_params)
 popsize = 20
 strategy = CMA_ES(popsize=popsize, num_dims=num_dims)
 es_params = strategy.default_params
+es_params = es_params.replace(clip_min=-1, clip_max=1)
 
 # Initialize the strategy
 rng = jax.random.PRNGKey(0)
 state = strategy.initialize(rng)
 
 # Run the optimization
-num_generations = 100
+num_generations = 50
 losses = []
 param_values = {k: [] for k in trainable_params.keys()}
 
@@ -318,8 +321,8 @@ for gen in range(num_generations):
 
     if gen % 10 == 0:
         print(f"Generation {gen}: Best fitness = {best_fitness}")
-        for key, value in zip(trainable_params.keys(), best_params):
-            print(f"{key} = {value}")
+        # for key, value in zip(trainable_params.keys(), best_params):
+        #     print(f"{key} = {value}")
 
 # Final print to move to the next line after loop ends
 print()
@@ -357,7 +360,7 @@ import numpy as np
 one_second_samples = SAMPLE_RATE
 
 # Generate target saw wave
-target_audio = generate_saw_wave(pitch_to_hz(pitches[0]), 1, SAMPLE_RATE)
+target_audio = generate_synth_sound(pitch_to_hz(pitches[0]), 1, SAMPLE_RATE)
 target_audio_np = np.array(target_audio)  # Convert to NumPy array
 
 # Get the best parameters from the evolutionary optimization
@@ -373,47 +376,14 @@ synth_input = pitch_to_tensor(pitches[0], 1, one_second_samples, one_second_samp
 synth_audio = batched_model.apply({'params': synth_params}, synth_input[None, ...], one_second_samples)[0, 0]
 synth_audio_np = np.array(synth_audio)  # Convert to NumPy array
 
-# TEMP ##################################################
-def generate_synth_sound(duration, sample_rate):
-    # Adjustable parameters - modify these directly in the function
-    adjustable_params = {
-        '_dawdreamer/WT Pos': jnp.array(2.4669297),
-        '_dawdreamer/Low Shelf Gain': jnp.array(-2.7905803),
-        '_dawdreamer/Low Shelf Freq': jnp.array(-5.81432),
-        '_dawdreamer/Mid Peak Gain': jnp.array(-4.855621),
-        '_dawdreamer/Mid Peak Freq': jnp.array(1.5484457),
-        '_dawdreamer/Mid Peak Q': jnp.array(-1.978883),
-        '_dawdreamer/High Shelf Gain': jnp.array(-0.8280931),
-        '_dawdreamer/High Shelf Freq': jnp.array(-0.48556247)
-    }
-
-    # Combine fixed_params with adjustable_params
-    synth_params = {**fixed_params, **adjustable_params}
-
-    # Create input tensor
-    num_samples = int(duration * sample_rate)
-    frequency = 440  # A4 note, modify this if you want a different pitch
-    synth_input = pitch_to_tensor(frequency, 1, num_samples, num_samples)
-
-    # Generate audio using the synth
-    synth_audio = batched_model.apply({'params': synth_params}, synth_input[None, ...], num_samples)
-
-    # Remove batch dimension and return
-    return synth_audio[0, 0]
-
-
-synth_sound = generate_synth_sound(duration, sample_rate)
-print(synth_sound)
-pass
-# TEMP ##################################################
-
 # Save audio files
-sf.write('target_saw.wav', target_audio_np, SAMPLE_RATE)
+sf.write('target_audio.wav', target_audio_np, SAMPLE_RATE)
 sf.write('synthesized_audio.wav', synth_audio_np, SAMPLE_RATE)
 
 
 # Visualize spectrograms using librosa with more options
 plt.figure(figsize=(14, 6))
+
 
 # Function to plot spectrogram with customized options
 def plot_spectrogram(audio, title, position):
@@ -437,6 +407,7 @@ def plot_spectrogram(audio, title, position):
     # Add a horizontal line at 440 Hz
     plt.axhline(y=440, color='r', linestyle='--', alpha=0.5)
 
+
 # Plot target audio spectrogram
 plot_spectrogram(target_audio_np, 'Target Spectrogram', 1)
 
@@ -446,5 +417,5 @@ plot_spectrogram(synth_audio_np, 'Synthesized Spectrogram', 2)
 plt.tight_layout()
 plt.show()
 
-print("Audio files saved as 'target_saw.wav' and 'synthesized_audio.wav'")
+print("Audio files saved as 'target_audio.wav' and 'synthesized_audio.wav'")
 print("Spectrogram visualization with detailed frequency labels complete. Check the displayed plot.")
