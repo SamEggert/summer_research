@@ -212,7 +212,7 @@ print_parameters(trainable_params)
 
 
 ### Step 2: Create a Target Sound
-def generate_synth_sound(frequency, duration, sample_rate):
+def generate_synth_sound(pitch, duration, sample_rate):
     # Adjustable parameters - modify these directly in the function
     adjustable_params = {
         '_dawdreamer/WT Pos': jnp.array(0.5),
@@ -229,7 +229,7 @@ def generate_synth_sound(frequency, duration, sample_rate):
     synth_params = {**fixed_params, **adjustable_params}
 
     num_samples = int(duration * sample_rate)
-    synth_input = pitch_to_tensor(frequency, 1, num_samples, num_samples)
+    synth_input = pitch_to_tensor(pitch, 1, num_samples, num_samples)
 
     synth_audio = batched_model.apply({'params': synth_params}, synth_input[None, ...], num_samples)
 
@@ -242,7 +242,7 @@ sample_rate = SAMPLE_RATE  # Sample rate
 
 # Generate the saw wave
 target_sound = jnp.stack([
-    generate_synth_sound(pitch_to_hz(pitch), duration, sample_rate) for pitch in pitches
+    generate_synth_sound(pitch, duration, sample_rate) for pitch in pitches
 ], axis=0)
 
 target_sound = jnp.expand_dims(target_sound, 1)
@@ -360,7 +360,7 @@ import numpy as np
 one_second_samples = SAMPLE_RATE
 
 # Generate target saw wave
-target_audio = generate_synth_sound(pitch_to_hz(pitches[0]), 1, SAMPLE_RATE)
+target_audio = generate_synth_sound(pitches[0], 1, SAMPLE_RATE)
 target_audio_np = np.array(target_audio)  # Convert to NumPy array
 
 # Get the best parameters from the evolutionary optimization
